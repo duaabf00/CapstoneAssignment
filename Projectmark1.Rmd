@@ -1,0 +1,224 @@
+---
+title: "projectmark"
+author: "DuaaFahs"
+date: "2024-02-26"
+output: html_document
+---
+```{r setup, include=FALSE}
+library(dplyr)
+library(stringi)
+library(ggplot2)
+options(repos = "https://cloud.r-project.org")
+install.packages("quanteda")
+library(quanteda)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Synopsis
+The goal of the project is to build a predictive model for suggesting next word given a text input.
+In this report we will summarise data exploration for next word prediction model. 
+Dataset consists of corpus in English, German and finnish.We will focus on english text for this project.
+We will use data from https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip.
+Data consists of three corpora from blogs, new and twitter sites. Lets load and explore the data.
+```{r}
+# Specify the full file paths
+file_twitter <- "C:/Users/bfahs/OneDrive/Documents/datasciencecoursera/DF-Capstone/en_US/en_US.twitter.txt"
+file_news <- "C:/Users/bfahs/OneDrive/Documents/datasciencecoursera/DF-Capstone/en_US/en_US.news.txt"
+file_blogs <- "C:/Users/bfahs/OneDrive/Documents/datasciencecoursera/DF-Capstone/en_US/en_US.blogs.txt"
+
+# Attempt to open the files for reading
+conn_twitter <- tryCatch({
+  file(file_twitter, "r")
+}, error = function(e) {
+  cat("Error opening file 'en_US.twitter.txt':", e$message, "\n")
+  NULL
+})
+
+conn_news <- tryCatch({
+  file(file_news, "r")
+}, error = function(e) {
+  cat("Error opening file 'en_US.news.txt':", e$message, "\n")
+  NULL
+})
+
+conn_blogs <- tryCatch({
+  file(file_blogs, "r")
+}, error = function(e) {
+  cat("Error opening file 'en_US.blogs.txt':", e$message, "\n")
+  NULL
+})
+
+# Read the files if connections are valid
+if (!is.null(conn_twitter)) {
+  twitterText <- readLines(conn_twitter, encoding = "UTF-8", skipNul = TRUE)
+  close(conn_twitter)
+} else {
+  twitterText <- character()
+}
+
+if (!is.null(conn_news)) {
+  newsText <- readLines(conn_news, encoding = "UTF-8", skipNul = TRUE)
+  close(conn_news)
+} else {
+  newsText <- character()
+}
+
+if (!is.null(conn_blogs)) {
+  blogsText <- readLines(conn_blogs, encoding = "UTF-8", skipNul = TRUE)
+  close(conn_blogs)
+} else {
+  blogsText <- character()
+}
+
+# Calculate file sizes and word counts
+sizeTwitter <- file.info(file_twitter)$size / 1024
+sizeNews <- file.info(file_news)$size / 1024
+sizeBlogs <- file.info(file_blogs)$size / 1024
+wordsTwitter <- stri_count_words(twitterText)
+wordsNews <- stri_count_words(newsText)
+wordsBlogs <- stri_count_words(blogsText)
+
+# Create the data frame with the desired information
+data.frame(
+  Source = c("Twitter", "News", "Blogs"),
+  SizeMB = c(sizeTwitter, sizeNews, sizeBlogs),
+  NoofLines = c(length(twitterText), length(newsText), length(blogsText)),
+  NoOfWords = c(sum(wordsTwitter), sum(wordsNews), sum(wordsBlogs))
+)
+```
+### Data Sampling
+Due to memory limitations, we will use a sample of the data for our modeling.
+I have merged data from all three files into a consolidated file and sampled 15% lines from this file.
+We will put the result in another file and load it into a corpus object.
+```{r}
+set.seed(1288)
+
+# Function to read file with error handling
+read_file_with_error_handling <- function(file_path) {
+  tryCatch({
+    con <- file(file_path, "r", encoding = "UTF-8")
+    lines <- readLines(con, skipNul = TRUE)
+    close(con)
+    lines
+  }, error = function(e) {
+    cat("Error opening file:", e$message, "\n")
+    character() # Return empty character vector on error
+  })
+}
+
+# Read files with error handling
+twitterText <- read_file_with_error_handling(file_twitter)
+newsText <- read_file_with_error_handling(file_news)
+blogsText <- read_file_with_error_handling(file_blogs)
+
+# Check if the files were successfully read
+if (length(twitterText) == 0 || length(newsText) == 0 || length(blogsText) == 0) {
+  stop("Error: One or more files could not be read. Please verify the file paths and permissions.")
+}
+
+if (!file.exists("mergedfile.txt")) {
+  fulltext <- c(twitterText, newsText, blogsText)
+  nlines <- length(fulltext)
+  
+  selection <- rbinom(nlines, 1, .15)
+  sampled_lines <- fulltext[selection == 1]
+  
+  # Write sampled lines directly to the file
+  writeLines(sampled_lines, "sampledfile.txt")
+  
+  # Print message indicating the number of lines saved
+  cat("Saved", sum(selection), "lines to file sampledfile.txt\n")
+}
+
+mytf3 <- readLines("sampledfile.txt", encoding = "UTF-8")
+myCorpus <- corpus(mytf3)
+```
+###Helper Method
+```{r}
+getProfanities <- function() {
+  profanityFile <- "profanities.txt"
+  if (!file.exists(profanityFile)) {
+    download.file('http://www.cs.cmu.edu/~biglou/resources/bad-words.txt',
+                  profanityFile)
+  }
+  profanities <- read.csv("profanities.txt", header = FALSE, stringsAsFactors = FALSE)
+  profanities$V1
+}
+
+plotMostFrequentwords <- function(nGrams, title){
+    nGramList <-  unlist(nGrams, recursive = FALSE, use.names = FALSE)
+    wordFreq <- table(nGramList)
+    mostfreqTwoGrams <- as.data.frame(sort(wordFreq,decreasing=TRUE)[1:10])
+    ggplot(mostfreqTwoGrams, aes(x= nGramList,y = Freq)) +geom_bar(stat = "identity") + theme(axis.text.x = element_text(angle = 90, hjust = 0))  + ggtitle(title)
+}
+
+```
+###Data cleanup
+Any text prediction algorithm has to deal with offensive words.
+Then we will create n-grams and remove the profanities using tokens_remove feature of quanteda.
+We will use the list of bad words available at http://www.cs.cmu.edu/~biglou/resources/bad-words.txt.
+
+```{r results = 'hide'}
+# Tokenization and N-gram Generation with Memory Optimization
+# Define function to tokenize and create n-grams with memory optimization
+process_sentences <- function(sentences, n = 1L) {
+  # Tokenize sentences
+  tokens <- tokens(sentences, remove_punct = TRUE)
+  # Remove profanities
+  tokens <- tokens_remove(tokens, getProfanities())
+  # Convert to lowercase
+  tokens <- tokens_tolower(tokens)
+  # Create n-grams
+  ngrams <- tokens_ngrams(tokens, n = n)
+  
+  return(ngrams)
+}
+# Define unique_sentences before using it
+# Tokenize sentences
+sentences <- tokens(myCorpus, what = "sentence", remove_punct = TRUE)
+# Remove profanities
+sentences <- tokens_remove(sentences, getProfanities())
+# Convert to lowercase
+sentences <- unlist(lapply(sentences, function(a) char_tolower(a)))
+# Remove duplicate sentences
+unique_sentences <- unique(sentences)
+# Initialize n-gram vectors
+twoGrams <- threeGrams <- FourGrams <- character()
+# Process sentences in smaller chunks
+chunk_size <- 1000  # Adjust as needed
+num_chunks <- ceiling(length(unique_sentences) / chunk_size)
+
+for (i in 1:num_chunks) {
+  start_idx <- (i - 1) * chunk_size + 1
+  end_idx <- min(i * chunk_size, length(unique_sentences))
+  chunk <- unique_sentences[start_idx:end_idx]
+  
+  # Process chunk of sentences
+  twoGrams_chunk <- process_sentences(chunk, n = 2)
+  threeGrams_chunk <- process_sentences(chunk, n = 3)
+  FourGrams_chunk <- process_sentences(chunk, n = 4)
+  
+  # Combine results
+  twoGrams <- c(twoGrams, twoGrams_chunk)
+  threeGrams <- c(threeGrams, threeGrams_chunk)
+  FourGrams <- c(FourGrams, FourGrams_chunk)
+}
+
+# Check if n-grams are generated successfully
+head(twoGrams)
+head(threeGrams)
+head(FourGrams)
+
+```
+
+## Exploratory analysis 
+Most frequent bigrams, trigrams and four gram words: 
+```{r}
+ plotMostFrequentwords(twoGrams, "Top 10 bigrams")
+plotMostFrequentwords(threeGrams, "Top 10 trigrams")
+plotMostFrequentwords(FourGrams, "Top 10 quadGrams")
+
+```
+## Next steps
+Now we will create nGram model for predicting next words and deploy it in a shiny app.
+
